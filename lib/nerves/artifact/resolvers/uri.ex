@@ -20,7 +20,9 @@ defmodule Nerves.Artifact.Resolvers.URI do
       |> URI.parse()
       |> Map.put(:query, URI.encode_query(query_params))
 
-    result = Nerves.Utils.HTTPClient.get(pid, uri, opts)
+    result =
+      Nerves.Utils.HTTPClient.get(pid, uri, opts)
+
     Nerves.Utils.HTTPClient.stop(pid)
 
     result

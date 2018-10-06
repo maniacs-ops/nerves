@@ -44,7 +44,10 @@ defmodule Nerves.Utils.HTTPClient do
        filename: "",
        caller: nil,
        number_of_redirects: 0,
+       number_of_retries: 0,
+       retries: 5,
        progress?: true,
+       request: nil,
        opts: []
      }}
   end
@@ -73,8 +76,14 @@ defmodule Nerves.Utils.HTTPClient do
         Nerves.Utils.Proxy.config(url) ++ Keyword.get(opts, :http_opts, [])
 
     opts = [stream: :self, receiver: self(), sync: false]
-    :httpc.request(:get, {String.to_charlist(url), headers}, http_opts, opts, :nerves)
-    {:noreply, %{s | url: url, caller: from, opts: opts, progress?: progress?}}
+
+    req = fn ->
+      :httpc.request(:get, {String.to_charlist(url), headers}, http_opts, opts, :nerves)
+    end
+
+    s = %{s | url: url, caller: from, opts: opts, progress?: progress?, request: req}
+    execute_request(s)
+    {:noreply, s}
   end
 
   def handle_info({:http, {_, :stream_start, headers}}, s) do
@@ -129,7 +138,7 @@ defmodule Nerves.Utils.HTTPClient do
     {:noreply, %{s | filename: "", content_length: 0, buffer: "", buffer_size: 0, url: nil}}
   end
 
-  def handle_info({:http, {_ref, {{_, status_code, _}, headers, _body}}}, s)
+  def handle_info({:http, {_ref, {{_, status_code, _}, headers, _body}}} = resp, s)
       when status_code in @redirect_status_codes do
     case Enum.find(headers, fn {key, _} -> key == 'location' end) do
       {'location', next_location} ->
@@ -147,8 +156,24 @@ defmodule Nerves.Utils.HTTPClient do
 
   def handle_info({:http, {_ref, {{_, status_code, reason}, _headers, _body}}}, s) do
     reason = "Status #{to_string(status_code)} #{to_string(reason)}"
+    IO.inspect(reason, label: "Unkown HTTP response")
     GenServer.reply(s.caller, {:error, reason})
     {:noreply, s}
+  end
+
+  def handle_info(
+        {:http, {_ref, {:error, reason}}},
+        %{retries: retries, number_of_retries: attempt} = s
+      )
+      when attempt >= retries do
+    GenServer.reply(s.caller, {:error, reason})
+    {:noreply, s}
+  end
+
+  def handle_info({:http, {_ref, {:error, reason}}}, s) do
+    IO.puts("HTTP ERROR: #{inspect(reason)}")
+    execute_request(s)
+    {:noreply, %{s | number_of_retries: s.retries + 1}}
   end
 
   def put_progress(size, max) do
@@ -185,5 +210,9 @@ defmodule Nerves.Utils.HTTPClient do
 
   defp progress?(%{progress?: progress?}) do
     System.get_env("NERVES_LOG_DISABLE_PROGRESS_BAR") == nil and progress?
+  end
+
+  defp execute_request(%{request: request}) do
+    request.()
   end
 end
